@@ -1,7 +1,7 @@
 """
 common.py
 
-List of helpers that are shared by runs.
+List of helpers that are shared by the experiment.
 
 Framework-free helpers shared by the experiment: data, splits, features, metrics.
 
@@ -21,22 +21,80 @@ DATA_DIR = Path(__file__).parent / "data"
 SURNAME, PASTA = 0, 1
 CLASS_NAMES = ("surname", "pasta")
 
-# --------------------------------------------------------------------
-# Data functions
-# --------------------------------------------------------------------
+# -----------------------------------------------------------------
+# Data helpers
+# -----------------------------------------------------------------
 
 def read_words(path):
+    """
+    Read non-empty words from a UTF-8 text file.
+
+    Reads a text file containing one word per line.
+    Leading and trailing whitespace is removed, and
+    empty or whitespace-only lines are ignored.
+
+    Args:
+        path (str | Path): Path to the text file.
+
+    Returns:
+        list[str]: List of words in their original order,
+            excluding empty lines.
+
+    Raises:
+        FileNotFoundError: If the specified file does not exist.
+        UnicodeDecodeError: If the file cannot be decoded as UTF-8.
+        OSError: If the file cannot be opened or read.
+    """
     return [w.strip() for w in open(path, encoding="utf-8") if w.strip()]
 
 
-def load_data(strict=False, similarity=0.8):
-    """Return (train_pairs, quiz_pairs, removed_words).
 
-    train_pairs / quiz_pairs are lists of (word, label). The 40 quiz words are guaranteed not to be in
-    train_pairs. With strict=True, every training word whose spelling is >= `similarity` similar
-    (difflib ratio) to ANY quiz word is also removed, so near-variants (Bellini/Bellino, ziti/zite...)
-    cannot leak the answer.
+def load_data(strict=False, similarity=0.8):
+    """Load the labeled training words and held-out quiz dataset.
+
+    Reads Italian surnames and pasta names from text files and loads
+    the 40-word evaluation quiz from a TSV file.
+
+    Quiz words are never included in the training dataset.
+
+    When strict mode is enabled, training words that are too similar to any quiz word are also excluded. 
+    This reduces the risk of evaluating the model on near-duplicates of words it encountered during training.
+
+    Similarity is calculated using difflib.SequenceMatcher.
+
+    Args:
+        strict (bool): If True, remove training words whose spelling similarity 
+            to any quiz word is greater than or equal to the similarity threshold.
+            Defaults to False.
+
+        similarity (float): Similarity threshold used in strict mode. 
+        Defaults to 0.8.
+
+    Returns:
+        tuple:
+            train_pairs (list[tuple[str, int]]):
+                Training words paired with their class labels.
+
+            quiz_pairs (list[tuple[str, int]]):
+                Held-out quiz words and their correct labels.
+
+            removed_words (list[str]):
+                Training words excluded by strict filtering.
+                Empty when strict=False.
+
+    Raises:
+        AssertionError: If a quiz word appears in the
+            training dataset or if training words are duplicated.
+
+    Notes:
+        Class labels:
+            0 = Italian surname
+            1 = Pasta shape
+
+        Strict filtering compares the original spelling
+        using a case-sensitive similarity measure.
     """
+
     surnames = read_words(DATA_DIR / "surnames.txt")
     pastas = read_words(DATA_DIR / "pastas.txt")
     quiz = []
@@ -101,26 +159,77 @@ def steps_per_epoch(train, batch_size):
     n = 2 * min(sum(1 for _, l in train if l == SURNAME), sum(1 for _, l in train if l == PASTA))
     return math.ceil(n / batch_size)
 
-# ------------------------------------------------------------ features ----
+# -----------------------------------------------------------------
+# Features and Embeddings
+# -----------------------------------------------------------------
 
 def ngrams(word, n_max=3):
     s = "^" + word + "$"
     return [s[i:i + n] for n in range(1, n_max + 1) for i in range(len(s) - n + 1)]
 
 
+
 class NgramVocab:
-    """Binary bag of character 1-3-grams (with ^ and $ word-boundary markers) for the MLP.
-    The vocabulary is built from the training words only."""
+    """
+    Build a vocabulary of character n-gram features for the MLP.
+
+    Extracts character 1-, 2-, and 3-grams from training words,
+    including start (^) and end ($) boundary markers.
+
+    Only n-grams appearing in at least min_count distinct
+    training words are included.
+
+    Each word is represented as a binary feature vector:
+        1 = the n-gram appears in the word
+        0 = the n-gram does not appear
+
+    The representation ignores how many times an n-gram occurs.
+
+    Attributes:
+        index (dict[str, int]): Mapping from each retained
+            n-gram to its feature column index.
+    """
 
     def __init__(self, words, min_count=2):
+        """Construct the n-gram vocabulary.
+
+        Args:
+            words (list[str]): Training words used to build
+                the vocabulary.
+            min_count (int): Minimum number of distinct words
+                containing an n-gram for it to be retained.
+        """
         c = Counter(g for w in words for g in set(ngrams(w)))
-        self.index = {g: i for i, g in enumerate(sorted(g for g, k in c.items() if k >= min_count))}
+        self.index = {
+            g: i
+            for i, g in enumerate(
+                sorted(g for g, k in c.items() if k >= min_count)
+            )
+        }
 
     def __len__(self):
+        """Return the number of retained n-gram features."""
         return len(self.index)
 
     def transform(self, words):
-        X = np.zeros((len(words), len(self.index)), dtype=np.float32)
+        """Encode words as binary n-gram feature vectors.
+
+        Args:
+            words (list[str]): Words to encode using the
+                existing vocabulary.
+
+        Returns:
+            np.ndarray: Float32 array of shape
+                (number_of_words, vocabulary_size).
+
+        Notes:
+            Unknown n-grams are ignored.
+            The vocabulary is not modified during encoding.
+        """
+        X = np.zeros(
+            (len(words), len(self.index)),
+            dtype=np.float32
+        )
         for i, w in enumerate(words):
             for g in ngrams(w):
                 j = self.index.get(g)
@@ -128,14 +237,42 @@ class NgramVocab:
                     X[i, j] = 1.0
         return X
 
-
 # Token ids for the transformer
+# Reserved token IDs: PAD (0) for padding, UNK (1) for unknown characters,
+# CLS (2) for sequence classification, MASK (3) for masked-token tasks,
+# and LETTER0 (4) as the starting ID for lowercase letters a-z (IDs 4-29).
 PAD, UNK, CLS, MASK, LETTER0 = 0, 1, 2, 3, 4
 VOCAB = LETTER0 + 26
 MAX_LEN = 18  # longest word in the data is 17 letters
 
 
 def encode_chars(words, max_len=MAX_LEN):
+    """
+    Convert words into fixed-length sequences of character token IDs.
+
+    Each word is encoded as a sequence of integers for use as input
+    to the Transformer model. The first position contains the special
+    CLS token, followed by the encoded characters of the word.
+
+    Lowercase letters (a-z) are mapped to token IDs 4-29.
+    Characters outside this range are assigned the UNK token.
+    Words shorter than max_len are padded with zeros (PAD),
+    while longer words are truncated to max_len characters.
+
+    Args:
+        words (list[str]): List of words to encode.
+        max_len (int): Maximum number of characters per word,
+            excluding the CLS token. Defaults to MAX_LEN (18).
+
+    Returns:
+        np.ndarray: A 2D integer array of shape
+            (len(words), max_len + 1), with dtype int64.
+            Each row represents one encoded word, where:
+                - Column 0 contains the CLS token (ID 2).
+                - Remaining columns contain character token IDs.
+                - Unused positions contain PAD tokens (ID 0).
+    """
+
     X = np.zeros((len(words), max_len + 1), dtype=np.int64)  # column 0 is [CLS]
     for i, w in enumerate(words):
         X[i, 0] = CLS
@@ -143,7 +280,9 @@ def encode_chars(words, max_len=MAX_LEN):
             X[i, j + 1] = LETTER0 + ord(ch) - 97 if "a" <= ch <= "z" else UNK
     return X
 
-# ------------------------------------------------------------- metrics ----
+# -----------------------------------------------------------------
+# Metrics as helpers
+# -----------------------------------------------------------------
 
 def accuracy(pred, y):
     return float(np.mean(np.asarray(pred) == np.asarray(y)))
@@ -153,7 +292,9 @@ def balanced_accuracy(pred, y):
     pred, y = np.asarray(pred), np.asarray(y)
     return float(np.mean([np.mean(pred[y == c] == c) for c in (SURNAME, PASTA)]))
 
-# ---------------------------------------------------- hyper-parameter search ----
+# -----------------------------------------------------------------
+# Hyperparameter search
+# -----------------------------------------------------------------
 
 _ARCH = dict(d_model=[64, 128], layers=[2, 3], dropout=[0.2, 0.3])
 SEARCH_SPACE = {
@@ -187,14 +328,58 @@ def sample_configs(key, n, seed=0):
             out.append(cfg)
     return out
 
-# ------------------------------------------- quiz results & LLM answer helpers ----
+# -----------------------------------------------------------------
+# Quiz Results, LLM helpers
+# -----------------------------------------------------------------
+
 
 def make_result(name, quiz, pred, **extra):
-    """Uniform result record used by run.py. pred: one 0/1 per quiz word (-1 = no valid answer)."""
+    """
+    Create a standardized result record for evaluating a model.
+
+    Compares the model's predicted labels against the correct quiz
+    labels and calculates the number and proportion of correct
+    predictions.
+
+    Args:
+        name (str): Name of the model or experiment.
+        quiz (list[tuple[str, int]]): Quiz words paired with their
+            correct labels (0 = surname, 1 = pasta).
+        pred (list[int]): Predicted labels in the same order as
+            the quiz words. A value of -1 indicates an invalid
+            or unrecognized prediction.
+        **extra: Additional information to include in the
+            result dictionary, such as before-RL accuracy.
+
+    Returns:
+        dict: Dictionary containing:
+            name (str): Model or experiment name.
+            quiz_acc (float): Fraction of correctly classified
+                quiz words, between 0 and 1.
+            n_correct (int): Number of correct predictions.
+            n (int): Total number of quiz words.
+            quiz_pred (list[int]): Model predictions.
+            Additional fields supplied through **extra.
+
+    Raises:
+        ValueError: If the quiz is empty, prediction count does
+            not match the quiz size, or predictions contain
+            labels other than -1, 0, or 1.
+    """
     pred = [int(p) for p in pred]
-    truth = [l for _, l in quiz]
-    n = sum(p == t for p, t in zip(pred, truth))
-    return dict(name=name, quiz_acc=n / len(quiz), n_correct=n, n=len(quiz), quiz_pred=pred, **extra)
+
+    if not quiz:
+        raise ValueError("Quiz must contain at least one word.")
+
+    if len(pred) != len(quiz):
+        raise ValueError("Number of predictions must match the quiz size.")
+
+    if any(p not in (-1, SURNAME, PASTA) for p in pred):
+        raise ValueError("Predictions must be -1, 0, or 1.")
+
+    truth = [label for _, label in quiz]
+    n_correct = sum(p == t for p, t in zip(pred, truth))
+    return dict(name=name, quiz_acc=n_correct / len(quiz), n_correct=n_correct, n=len(quiz), quiz_pred=pred, **extra)
 
 
 LLM_SYSTEM = ("You classify words. Reply with exactly one word: 'surname' if the word is an Italian family name, "
@@ -204,8 +389,27 @@ LLM_SHOTS = [("Rossi", "surname"), ("penne", "pasta"), ("Verdi", "surname"), ("r
              ("Vivaldi", "surname"), ("farfalle", "pasta"), ("Bianchi", "surname"), ("fusilli", "pasta")]
 
 
+
 def llm_messages(word):
-    """Chat messages for one word: instruction, 8 worked examples, then the question."""
+    """Construct a few-shot chat prompt for classifying a word.
+
+    Creates a conversation containing a system instruction, eight
+    labeled examples of Italian surnames and pasta shapes, and
+    the target word as the final user message.
+
+    Args:
+        word (str): Word to classify as a surname or pasta shape.
+
+    Returns:
+        list[dict]: Chat messages containing:
+            - A system message defining the classification task.
+            - Eight user-assistant example pairs from LLM_SHOTS.
+            - A final user message containing the target word.
+
+    Notes:
+        The target word is capitalized using str.capitalize().
+        The output is intended for models supporting chat templates.
+    """
     msgs = [{"role": "system", "content": LLM_SYSTEM}]
     for w, a in LLM_SHOTS:
         msgs += [{"role": "user", "content": w}, {"role": "assistant", "content": a}]
@@ -213,13 +417,56 @@ def llm_messages(word):
 
 
 def llm_plain(word):
-    """Same thing as plain text, for models that have no chat template."""
+    """Construct a plain-text few-shot prompt for word classification.
+
+    Formats the system instruction and eight labeled examples as
+    a single string, followed by the target word and a colon.
+    This allows language models without chat templates to perform
+    the same surname-versus-pasta classification task.
+
+    Args:
+        word (str): Word to classify as a surname or pasta shape.
+
+    Returns:
+        str: A formatted prompt containing the classification
+            instruction, labeled examples, and target word.
+
+    Notes:
+        The target word is capitalized using str.capitalize().
+        The trailing colon encourages the model to generate
+        the corresponding class label.
+    """
     shots = "\n".join(f"{w}: {a}" for w, a in LLM_SHOTS)
     return f"{LLM_SYSTEM}\n\n{shots}\n{word.capitalize()}:"
 
 
 def parse_label(text):
-    """Turn a generated answer into a label: PASTA, SURNAME, or None if it said neither."""
+    """Extract a classification label from an LLM-generated response.
+
+    Searches the generated text for category keywords and converts
+    the response into the corresponding numerical class label.
+
+    The matching is case-insensitive:
+        - "pasta" indicates the PASTA class (1).
+        - "surname" or "composer" indicates the SURNAME class (0).
+        - If both categories appear, the earliest matching
+          keyword determines the predicted class.
+        - If no keyword is found, the response is invalid.
+
+    Args:
+        text (str): Text generated by the language model.
+
+    Returns:
+        int | None: Predicted classification label:
+            0 (SURNAME): Italian surname.
+            1 (PASTA): Pasta shape.
+            None: No recognized category found.
+
+    Notes:
+        Keywords are matched as substrings, not complete words.
+        Therefore, the function may recognize keywords embedded
+        within longer words or sentences.
+    """
     t = text.lower()
     i_p = t.find("pasta")
     hits = [i for i in (t.find("surname"), t.find("composer")) if i >= 0]
@@ -229,6 +476,49 @@ def parse_label(text):
     return SURNAME if i_s >= 0 else None
 
 
+
+
 def answer_reward(label, truth):
-    """RL reward: 1 for the right category, 0 for the wrong one, -0.5 for an answer that is neither."""
+    """Calculate the reinforcement learning reward for an LLM answer.
+
+    Compares the category extracted from the generated text
+    against the correct category.
+
+    The reward function is deterministic and does not require
+    a learned reward model.
+
+    Args:
+        label (int | None): Predicted class returned by
+            parse_label(). None indicates an invalid answer.
+
+        truth (int): Correct class label.
+            0 = Italian surname
+            1 = Pasta shape
+
+    Returns:
+        float: Reward assigned to the generated answer.
+
+            1.0: Correct classification.
+            0.0: Incorrect classification.
+           -0.5: Invalid or unrecognized answer.
+
+    Examples:
+        >>> answer_reward(SURNAME, SURNAME)
+        1.0
+
+        >>> answer_reward(PASTA, SURNAME)
+        0.0
+
+        >>> answer_reward(None, SURNAME)
+        -0.5
+
+    Notes:
+        This reward is used by the group-relative
+        reinforcement learning training loop.
+
+        The reward is not differentiable. Instead, it is
+        used to weight the log-probability of generated
+        responses in the policy-gradient objective.
+    """
     return -0.5 if label is None else (1.0 if label == truth else 0.0)
+

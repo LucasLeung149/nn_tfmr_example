@@ -1,7 +1,18 @@
-"""Method 1 - a plain 3-layer MLP with a softmax output, on character n-gram features.
+"""
+method_mlp.py
 
-The word is turned into a 0/1 vector saying which letter 1-, 2- and 3-grams it contains (with ^ and $ marking the
-start and end), then goes through  features -> 64 -> 32 -> 2  and a softmax. No sequence model, no pretraining.
+Method 1 - a plain 3-layer MLP with a softmax output, on character n-gram features.
+
+The embedding uses the Ngram vocab for embedding, with ^ and $ acting as the begin and end markers/
+The MLP set up is as follows
+
+    features -> 64 -> 32 -> 2 (softmax) for class 
+
+Classes: 
+    0 - surname
+    1 - pasta
+
+To run in terminal:
 
     python method_mlp.py            (or: python run.py mlp)
 """
@@ -16,10 +27,13 @@ class MLP(nn.Module):
     def __init__(self, n_in, hidden=(64, 32), dropout=0.3):
         super().__init__()
         self.net = nn.Sequential(
+            # fill it in!
             # Layer 1 -- linear, ReLU and dropout layer
-            nn.Linear(n_in, hidden[0]), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden[0], hidden[1]), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(hidden[1], 2)
+
+            # Layer 2 -- linear, ReLU and dropout
+
+            # Layer 3 -- map to classes
+
             )
 
     def forward(self, x):

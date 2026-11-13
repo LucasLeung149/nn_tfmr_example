@@ -18,12 +18,15 @@ from pathlib import Path
 
 from common import CLASS_NAMES, load_data
 
+# define the methods
 METHODS = {"mlp": "method_mlp", "transformer": "method_transformer", "pretrained": "method_pretrained_rl"}
 
 
 def report(results, quiz, log=print):
     """
-    The report function -- 
+    The report function -- prints out a summary table.
+    Used for the quiz
+
     Summary table (one row per result, 'before RL' rows included) + per-word table.
     """
     rows = []
@@ -47,6 +50,7 @@ def report(results, quiz, log=print):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    # Flags as helpers for different settings
     p.add_argument("method", choices=[*METHODS, "all"])
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--strict", action="store_true")
@@ -61,15 +65,22 @@ def main(argv=None):
     p.add_argument("--out", default="results_quiz")
     a = p.parse_args(argv)
 
+    # load the dataset
     _, quiz, _ = load_data(strict=a.strict)
+    # create an empty results list
     results = []
+    # loop through all the selected methods
     for key in (METHODS if a.method == "all" else [a.method]):
         print(f"\n### {key}", flush=True)
         t0 = time.time()
         try:
+            # dynamically import the model
             run = importlib.import_module(METHODS[key]).run
+            # pass only the relevant arguments for the model
             kw = {k: v for k, v in vars(a).items() if v is not None and k in inspect.signature(run).parameters}
+            # run the model and save the results
             results.append(run(log=lambda m: print(m, flush=True), **kw))
+            # give timings too
             print(f"  done in {time.time() - t0:.0f}s", flush=True)
         except Exception as e:  # keep going so one missing dependency doesn't lose the other methods
             print(f"  {key} FAILED: {type(e).__name__}: {e}", flush=True)
